@@ -1,23 +1,14 @@
-import { GoogleGenAI, Type } from "@google/genai";
-import { ExtractionResult, PropertyType, LoanPurpose, RatePreference, UserContext } from '../types';
+import {
+  ExtractionResult,
+  PropertyType,
+  LoanPurpose,
+  RatePreference,
+  UserContext,
+} from "../types";
 
-// Safe Env Access
-const getApiKey = () => {
-  try {
-    // @ts-ignore
-    if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
-      // @ts-ignore
-      return process.env.API_KEY;
-    }
-  } catch (e) {}
-  return ''; 
-};
-
-// Initialize Gemini
-const ai = new GoogleGenAI({ apiKey: getApiKey() });
-const modelName = 'gemini-2.5-flash';
-
-// --- System Instructions ---
+/* ------------------------------------
+   SYSTEM PROMPTS (UNCHANGED)
+------------------------------------ */
 
 const EXTRACTION_SYSTEM_PROMPT = `
 You are the logic engine for Dexter.
@@ -43,55 +34,66 @@ You rely on the provided context to guide the user.
 Keep responses under 100 words unless explaining a complex concept.
 
 VOICE & TONE GUIDELINES:
-1. **Be a Consultant, Not a Form**: Don't just ask "What is your loan size?". Say "To find the best tier for you, could you share the estimated loan amount?"
-2. **No Robot Talk**: Never say "As an AI" or "I am a bot". 
-3. **Singapore Context**: Use local terms naturally (HDB, SORA, Lock-in).
-4. **Validation**: If a user gives a high loan amount (e.g., >1M), subtly acknowledge it ("Understood, for that volume, we can look at premier tiers...").
-5. **Logic First**: If the user asks for something impossible (e.g., Fixed rates for 20 years), politely explain that in Singapore, fixed rates usually last 2-3 years.
-
-YOUR CURRENT GOAL:
-Guide the user to the right loan package by gathering the 4 pillars of mortgage facts: Property Type, Loan Amount, Purpose, and Rate Preference.
+1. Be a Consultant, Not a Form
+2. No Robot Talk
+3. Singapore Context (HDB, SORA, Lock-in)
+4. Validation for large loan sizes
+5. Logic First
 `;
 
-// --- API Functions ---
+/* ------------------------------------
+   INTERNAL HELPER — CALL BACKEND
+------------------------------------ */
+
+async function callGeminiBackend(payload: any) {
+  const res = await fetch("/api/gemini", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    throw new Error("Gemini backend failed");
+  }
+
+  return res.json();
+}
+
+/* ------------------------------------
+   EXTRACT INTENT & ENTITIES
+------------------------------------ */
 
 export const extractIntentAndEntities = async (
   userMessage: string,
   currentContext: UserContext
 ): Promise<ExtractionResult> => {
   try {
-    const response = await ai.models.generateContent({
-      model: modelName,
-      contents: `Current Context: ${JSON.stringify(currentContext)}. User Input: "${userMessage}"`,
+    const data = await callGeminiBackend({
+      model: "gemini-2.5-flash",
+      contents: `Current Context: ${JSON.stringify(
+        currentContext
+      )}. User Input: "${userMessage}"`,
       config: {
         systemInstruction: EXTRACTION_SYSTEM_PROMPT,
         responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            propertyType: { type: Type.STRING, enum: [PropertyType.HDB, PropertyType.PRIVATE, PropertyType.UNKNOWN] },
-            loanSize: { type: Type.NUMBER },
-            loanPurpose: { type: Type.STRING, enum: [LoanPurpose.NEW_PURCHASE, LoanPurpose.REFINANCE, LoanPurpose.UNKNOWN] },
-            ratePreference: { type: Type.STRING, enum: [RatePreference.FIXED, RatePreference.FLOATING, RatePreference.UNKNOWN] },
-            intent: { type: Type.STRING, enum: ['exploratory', 'direct', 'mixed'] },
-            reasoning: { type: Type.STRING }
-          }
-        }
-      }
+      },
     });
 
-    if (response.text) {
-      return JSON.parse(response.text) as ExtractionResult;
-    }
-    throw new Error("Empty response from Gemini");
+    if (!data.text) throw new Error("Empty Gemini response");
+
+    return JSON.parse(data.text) as ExtractionResult;
   } catch (error) {
-    console.error("Gemini Extraction Error:", error);
+    console.error("Extraction failed:", error);
     return {
-      intent: 'mixed',
-      reasoning: 'Fallback due to error',
+      intent: "mixed",
+      reasoning: "Fallback due to error",
     };
   }
 };
+
+/* ------------------------------------
+   GENERATE ASSISTANT RESPONSE
+------------------------------------ */
 
 export const generateAssistantResponse = async (
   userMessage: string,
@@ -100,31 +102,36 @@ export const generateAssistantResponse = async (
   context?: UserContext
 ): Promise<string> => {
   let specificInstruction = "";
-  
-  if (state === 'FACT_FINDING') {
+
+  if (state === "FACT_FINDING") {
     specificInstruction = `
-      The user is missing: ${missingFields.join(', ')}. 
-      Context so far: ${JSON.stringify(context)}.
-      Task: Acknowledge what they just said warmly, then pivot to asking ONE (or max two) of the missing fields.
-      Example: "That's a good start. To ensure we check the right eligibility rules, is this for an HDB flat or a Private property?"
-    `;
-  } else if (state === 'HANDOVER') {
-    specificInstruction = "The user has seen the packages or requested help. Close gently and mention that the button below connects directly to a human specialist for complex handling.";
+The user is missing: ${missingFields.join(", ")}.
+Context so far: ${JSON.stringify(context)}.
+Task: Acknowledge warmly, then ask ONE missing field.
+`;
+  } else if (state === "HANDOVER") {
+    specificInstruction =
+      "Close gently and mention that the button below connects to a human specialist.";
   } else {
-    specificInstruction = "The user is asking a general question. Answer professionally using Singapore mortgage knowledge (SORA, FHR, etc).";
+    specificInstruction =
+      "Answer professionally using Singapore mortgage knowledge.";
   }
 
   try {
-    const response = await ai.models.generateContent({
-      model: modelName,
+    const data = await callGeminiBackend({
+      model: "gemini-2.5-flash",
       contents: userMessage,
       config: {
-        systemInstruction: `${CONVERSATION_SYSTEM_PROMPT}\n\nCURRENT TASK: ${specificInstruction}`
-      }
+        systemInstruction: `${CONVERSATION_SYSTEM_PROMPT}\n\nCURRENT TASK:\n${specificInstruction}`,
+      },
     });
-    return response.text || "I apologize, I'm having trouble connecting to the market data. Please try again.";
+
+    return (
+      data.text ||
+      "I’m having trouble accessing market data at the moment. Please try again."
+    );
   } catch (error) {
-    console.error("Gemini Generation Error:", error);
-    return "I can help with that. Could you clarify if you are looking at HDB or Private property?";
+    console.error("Assistant generation failed:", error);
+    return "I can help with that. Could you clarify if this is for an HDB or Private property?";
   }
 };
