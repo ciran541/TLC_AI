@@ -1,16 +1,37 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { ExtractionResult, PropertyType, LoanPurpose, RatePreference, UserContext } from '../types';
 
-// Safe Env Access
+// Safe Env Access for Vercel/Browser Environments
 const getApiKey = () => {
+  let key = '';
+  
+  // 1. Try process.env (Standard Node/CRA/Next.js)
   try {
     // @ts-ignore
-    if (typeof process !== 'undefined' && process.env && process.env.API_KEY) {
+    if (typeof process !== 'undefined' && process.env) {
       // @ts-ignore
-      return process.env.API_KEY;
+      key = process.env.API_KEY || 
+            // @ts-ignore
+            process.env.REACT_APP_API_KEY || 
+            // @ts-ignore
+            process.env.NEXT_PUBLIC_API_KEY || 
+            // @ts-ignore
+            process.env.VITE_API_KEY;
     }
   } catch (e) {}
-  return ''; 
+
+  // 2. Try import.meta.env (Vite/Modern ESM)
+  if (!key) {
+    try {
+      // @ts-ignore
+      if (typeof import.meta !== 'undefined' && import.meta.env) {
+        // @ts-ignore
+        key = import.meta.env.API_KEY || import.meta.env.VITE_API_KEY;
+      }
+    } catch (e) {}
+  }
+
+  return key || ''; 
 };
 
 // Initialize Gemini
